@@ -10,14 +10,14 @@ import (
 	"strings"
 )
 
-// Client holds configuration for accessing the Zotero API.
+//client api 
 type Client struct {
 	GroupID string
 	APIKey  string
 	BaseURL string
 }
 
-// NewClient creates a Zotero client with default base URL.
+// base to utalize the api 
 func NewClient(groupID, apiKey string) *Client {
 	return &Client{
 		GroupID: groupID,
@@ -26,15 +26,14 @@ func NewClient(groupID, apiKey string) *Client {
 	}
 }
 
-// ExportCollection downloads **only PDF files** from a top-level collection
-// (and all its subcollections) into the given outputDir.
+// only gets the pdfs from subcollection 
 func (c *Client) ExportCollection(parentName, outputDir string) error {
 	allCollections, err := c.fetchCollections()
 	if err != nil {
 		return err
 	}
 
-	// Find the top-level collection key by name.
+	// goes from the top then runs down
 	var datasetKey string
 	for _, col := range allCollections {
 		if col.Name == parentName {
@@ -46,7 +45,7 @@ func (c *Client) ExportCollection(parentName, outputDir string) error {
 		return fmt.Errorf("collection %q not found", parentName)
 	}
 
-	// Walk the collection tree and download PDFs.
+	// walk through 
 	for _, sub1 := range c.getSubcollections(datasetKey) {
 		fmt.Printf("User: %s\n", sub1.Name)
 		c.downloadPDFItems(sub1.Key, sub1.Name, outputDir)
@@ -58,8 +57,6 @@ func (c *Client) ExportCollection(parentName, outputDir string) error {
 	}
 	return nil
 }
-
-// ---- internal helpers ----
 
 func (c *Client) fetchCollections() ([]Collection, error) {
 	url := fmt.Sprintf("%s/groups/%s/collections?limit=1000", c.BaseURL, c.GroupID)
@@ -106,7 +103,7 @@ func (c *Client) getSubcollections(parentKey string) []Collection {
 	return subs
 }
 
-// downloadPDFItems grabs every PDF in a collection and saves it locally.
+//  grabs the pdfs then saves 
 func (c *Client) downloadPDFItems(collectionKey, collectionName, outputDir string) {
 	itemsURL := fmt.Sprintf("%s/groups/%s/collections/%s/items?limit=100",
 		c.BaseURL, c.GroupID, collectionKey)
@@ -134,7 +131,7 @@ func (c *Client) downloadPDFItems(collectionKey, collectionName, outputDir strin
 			continue
 		}
 
-		// Otherwise, check children for PDF attachments.
+		// check children
 		childrenURL := fmt.Sprintf("%s/groups/%s/items/%s/children",
 			c.BaseURL, c.GroupID, item.Data.Key)
 		var children []Attachment
