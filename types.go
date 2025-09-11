@@ -1,13 +1,13 @@
 package zoteroparse
 
-// Collection describes a Zotero collection.
+// zotero collection 
 type Collection struct {
 	Key              string      `json:"key"`
 	ParentCollection interface{} `json:"parentCollection"`
 	Name             string      `json:"name"`
 }
 
-// Item is a top-level Zotero item.
+//  item structure in zotero
 type Item struct {
 	Key  string `json:"key"`
 	Data struct {
@@ -16,7 +16,7 @@ type Item struct {
 	} `json:"data"`
 }
 
-// Attachment represents an attached file (e.g., a PDF).
+// getting the actual pdf 
 type Attachment struct {
 	Key  string `json:"key"`
 	Data struct {
