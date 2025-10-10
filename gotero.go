@@ -1,4 +1,4 @@
-package zoteroparse
+package gotero
 
 import (
 	"encoding/json"

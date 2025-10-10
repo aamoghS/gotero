@@ -1,4 +1,4 @@
-package zoteroparse
+package gotero
 
 // zotero collection
 type Collection struct {
