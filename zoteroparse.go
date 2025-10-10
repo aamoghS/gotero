@@ -10,14 +10,14 @@ import (
 	"strings"
 )
 
-//client api 
+// client api
 type Client struct {
 	GroupID string
 	APIKey  string
 	BaseURL string
 }
 
-// base to utalize the api 
+// base to utalize the api
 func NewClient(groupID, apiKey string) *Client {
 	return &Client{
 		GroupID: groupID,
@@ -26,7 +26,7 @@ func NewClient(groupID, apiKey string) *Client {
 	}
 }
 
-// only gets the pdfs from subcollection 
+// only gets the pdfs from subcollection
 func (c *Client) ExportCollection(parentName, outputDir string) error {
 	allCollections, err := c.fetchCollections()
 	if err != nil {
@@ -45,7 +45,7 @@ func (c *Client) ExportCollection(parentName, outputDir string) error {
 		return fmt.Errorf("collection %q not found", parentName)
 	}
 
-	// walk through 
+	// walk through
 	for _, sub1 := range c.getSubcollections(datasetKey) {
 		fmt.Printf("User: %s\n", sub1.Name)
 		c.downloadPDFItems(sub1.Key, sub1.Name, outputDir)
@@ -103,7 +103,7 @@ func (c *Client) getSubcollections(parentKey string) []Collection {
 	return subs
 }
 
-//  grabs the pdfs then saves 
+// grabs the pdfs then saves
 func (c *Client) downloadPDFItems(collectionKey, collectionName, outputDir string) {
 	itemsURL := fmt.Sprintf("%s/groups/%s/collections/%s/items?limit=100",
 		c.BaseURL, c.GroupID, collectionKey)

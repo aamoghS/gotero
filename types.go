@@ -1,6 +1,6 @@
 package zoteroparse
 
-// zotero collection 
+// zotero collection
 type Collection struct {
 	Key              string      `json:"key"`
 	ParentCollection interface{} `json:"parentCollection"`
@@ -16,7 +16,7 @@ type Item struct {
 	} `json:"data"`
 }
 
-// getting the actual pdf 
+// getting the actual pdf
 type Attachment struct {
 	Key  string `json:"key"`
 	Data struct {
