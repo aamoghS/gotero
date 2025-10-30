@@ -1,0 +1,1 @@
+Gotero is an open-source Go client for interacting with the Zotero API . It enables users to fetch Zotero collections and download PDFs concurrently, making it easy to automate and manage research libraries programmatically.
