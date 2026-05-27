@@ -6,22 +6,26 @@ It allows users to fetch collections and download PDFs concurrently.
 package gotero
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Client manages communication with the Zotero API.
 type Client struct {
-	GroupID string
-	APIKey  string
-	BaseURL string
+	GroupID    string
+	APIKey     string
+	BaseURL    string
+	HTTPClient *http.Client
 }
 
 // NewClient creates a new Gotero API client
@@ -30,12 +34,15 @@ func NewClient(groupID, apiKey string) *Client {
 		GroupID: groupID,
 		APIKey:  apiKey,
 		BaseURL: "https://api.zotero.org",
+		HTTPClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
 }
 
 // ExportCollection finds a top-level collection by name and downloads all PDFs recursively.
-func (c *Client) ExportCollection(parentName, outputDir string) error {
-	topLevelCollections, err := c.fetchTopLevelCollections()
+func (c *Client) ExportCollection(ctx context.Context, parentName, outputDir string) error {
+	topLevelCollections, err := c.fetchTopLevelCollections(ctx)
 	if err != nil {
 		return fmt.Errorf("could not fetch top-level collections: %w", err)
 	}
@@ -52,22 +59,24 @@ func (c *Client) ExportCollection(parentName, outputDir string) error {
 		return fmt.Errorf("top-level collection %q not found", parentName)
 	}
 
-	fmt.Printf("Found parent collection: %s (%s)\n", parentCollection.Data.Name, parentCollection.Key)
-	return c.processCollectionRecursively(parentCollection, outputDir)
+	slog.Info("Found parent collection", "name", parentCollection.Data.Name, "key", parentCollection.Key)
+	return c.processCollectionRecursively(ctx, parentCollection, outputDir)
 }
 
-func (c *Client) processCollectionRecursively(collection *Collection, outputDir string) error {
-	fmt.Printf("Processing: %s\n", collection.Data.Name)
-	c.downloadPDFsForCollection(collection.Key, collection.Data.Name, outputDir)
+func (c *Client) processCollectionRecursively(ctx context.Context, collection *Collection, outputDir string) error {
+	slog.Info("Processing collection", "name", collection.Data.Name)
+	if err := c.downloadPDFsForCollection(ctx, collection.Key, collection.Data.Name, outputDir); err != nil {
+		return fmt.Errorf("failed to download PDFs for %s: %w", collection.Data.Name, err)
+	}
 
-	subcollections, err := c.fetchSubcollections(collection.Key)
+	subcollections, err := c.fetchSubcollections(ctx, collection.Key)
 	if err != nil {
 		return fmt.Errorf("could not fetch subcollections for %s: %w", collection.Data.Name, err)
 	}
 
 	for i := range subcollections {
 		subOutputDir := filepath.Join(outputDir, sanitizeFileName(collection.Data.Name))
-		if err := c.processCollectionRecursively(&subcollections[i], subOutputDir); err != nil {
+		if err := c.processCollectionRecursively(ctx, &subcollections[i], subOutputDir); err != nil {
 			return err
 		}
 	}
@@ -75,28 +84,28 @@ func (c *Client) processCollectionRecursively(collection *Collection, outputDir 
 	return nil
 }
 
-func (c *Client) fetchTopLevelCollections() ([]Collection, error) {
+func (c *Client) fetchTopLevelCollections(ctx context.Context) ([]Collection, error) {
 	url := fmt.Sprintf("%s/groups/%s/collections/top?limit=100", c.BaseURL, c.GroupID)
 	var collections []Collection
-	err := c.fetchJSON(url, &collections)
+	err := c.fetchJSON(ctx, url, &collections)
 	return collections, err
 }
 
-func (c *Client) fetchSubcollections(parentKey string) ([]Collection, error) {
+func (c *Client) fetchSubcollections(ctx context.Context, parentKey string) ([]Collection, error) {
 	url := fmt.Sprintf("%s/groups/%s/collections/%s/collections?limit=100", c.BaseURL, c.GroupID, parentKey)
 	var collections []Collection
-	err := c.fetchJSON(url, &collections)
+	err := c.fetchJSON(ctx, url, &collections)
 	return collections, err
 }
 
-func (c *Client) fetchJSON(url string, target interface{}) error {
-	req, err := http.NewRequest("GET", url, nil)
+func (c *Client) fetchJSON(ctx context.Context, url string, target interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Add("Zotero-API-Key", c.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -109,19 +118,12 @@ func (c *Client) fetchJSON(url string, target interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-// downloadTask represents a single PDF download job
-type downloadTask struct {
-	ItemKey  string
-	FilePath string
-}
-
 // downloadPDFsForCollection fetches items in a collection and downloads their PDFs concurrently
-func (c *Client) downloadPDFsForCollection(collectionKey, collectionName, outputDir string) {
+func (c *Client) downloadPDFsForCollection(ctx context.Context, collectionKey, collectionName, outputDir string) error {
 	itemsURL := fmt.Sprintf("%s/groups/%s/collections/%s/items?limit=100", c.BaseURL, c.GroupID, collectionKey)
 	var items []Item
-	if err := c.fetchJSON(itemsURL, &items); err != nil {
-		fmt.Printf("  Error fetching items for collection %s: %v\n", collectionName, err)
-		return
+	if err := c.fetchJSON(ctx, itemsURL, &items); err != nil {
+		return fmt.Errorf("error fetching items for collection %s: %w", collectionName, err)
 	}
 
 	// Sort items by filename
@@ -130,58 +132,91 @@ func (c *Client) downloadPDFsForCollection(collectionKey, collectionName, output
 	})
 
 	folder := filepath.Join(outputDir, sanitizeFileName(collectionName))
-	_ = os.MkdirAll(folder, 0o755)
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", folder, err)
+	}
 
-	tasks := make(chan downloadTask)
 	var wg sync.WaitGroup
+	errChan := make(chan error, 1)
+	sem := make(chan struct{}, 4) // max 4 concurrent downloads
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	// Start 4 concurrent workers
-	for i := 0; i < 4; i++ {
+	run := func(fn func() error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for task := range tasks {
-				if err := c.downloadPDF(task.ItemKey, task.FilePath); err != nil {
-					fmt.Printf("  Failed to download %s: %v\n", task.FilePath, err)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			if err := fn(); err != nil {
+				select {
+				case errChan <- err:
+					cancel() // fail fast
+				default:
 				}
 			}
 		}()
 	}
 
 	for _, item := range items {
+		item := item // capture loop variable
 		if item.Data.ItemType == "attachment" && item.Data.ContentType == "application/pdf" {
-			tasks <- downloadTask{ItemKey: item.Key, FilePath: filepath.Join(folder, item.Data.Filename)}
+			run(func() error {
+				path := filepath.Join(folder, item.Data.Filename)
+				return c.downloadPDF(ctx, item.Key, path, item.Data.Filename)
+			})
 			continue
 		}
 
-		childrenURL := fmt.Sprintf("%s/groups/%s/items/%s/children", c.BaseURL, c.GroupID, item.Key)
-		var children []Item
-		if err := c.fetchJSON(childrenURL, &children); err != nil {
-			fmt.Printf("  Error fetching children for item %s: %v\n", item.Data.Title, err)
-			continue
-		}
-
-		sort.Slice(children, func(i, j int) bool {
-			return children[i].Data.Filename < children[j].Data.Filename
-		})
-
-		for _, child := range children {
-			if child.Data.ItemType == "attachment" && child.Data.ContentType == "application/pdf" {
-				tasks <- downloadTask{ItemKey: child.Key, FilePath: filepath.Join(folder, child.Data.Filename)}
+		run(func() error {
+			childrenURL := fmt.Sprintf("%s/groups/%s/items/%s/children", c.BaseURL, c.GroupID, item.Key)
+			var children []Item
+			if err := c.fetchJSON(ctx, childrenURL, &children); err != nil {
+				slog.Warn("Error fetching children for item", "itemTitle", item.Data.Title, "error", err)
+				return nil // Don't fail the entire group for one missing child
 			}
-		}
+
+			for _, child := range children {
+				child := child // capture
+				if child.Data.ItemType == "attachment" && child.Data.ContentType == "application/pdf" {
+					run(func() error {
+						path := filepath.Join(folder, child.Data.Filename)
+						return c.downloadPDF(ctx, child.Key, path, child.Data.Filename)
+					})
+				}
+			}
+			return nil
+		})
 	}
 
-	close(tasks)
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
+
+	if err := <-errChan; err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (c *Client) downloadPDF(itemKey, filePath string) error {
+func (c *Client) downloadPDF(ctx context.Context, itemKey, filePath, filename string) error {
 	url := fmt.Sprintf("%s/groups/%s/items/%s/file", c.BaseURL, c.GroupID, itemKey)
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Zotero-API-Key", c.APIKey)
 
+	// Use a custom client for this request to handle redirects with auth
 	client := &http.Client{
+		Timeout: 5 * time.Minute, // PDFs can be large
 		CheckRedirect: func(r *http.Request, via []*http.Request) error {
 			r.Header.Set("Zotero-API-Key", c.APIKey)
 			return nil
@@ -190,22 +225,28 @@ func (c *Client) downloadPDF(itemKey, filePath string) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to make request to download %s: %w", filename, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return fmt.Errorf("download failed for %s with status %d", filename, resp.StatusCode)
 	}
 
 	f, err := os.Create(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create file %s: %w", filePath, err)
 	}
 	defer f.Close()
 
+	slog.Info("Downloading PDF", "filename", filename)
+
 	_, err = io.Copy(f, resp.Body)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filePath, err)
+	}
+
+	return nil
 }
 
 // sanitizeFileName replaces invalid filename characters
